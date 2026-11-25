@@ -1,0 +1,61 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>html,body{margin:0;background:transparent;overflow:hidden}svg{display:block}</style>
+<div id="root"></div>
+<script type="module">
+// 앱 아이콘과 메뉴바 아이콘. 트리의 모양은 앱이 쓰는 것(src/game/tree.js) 그대로다.
+//   icon.html        → 앱 아이콘 (밤색 판 위의 트리, 방울은 맥 창의 빨강·노랑·초록)
+//   icon.html?tray   → 메뉴바 아이콘 (검정 실루엣 — macOS 가 색을 입힌다)
+import { CX, STAR, TIERS, TRUNK, tierPath } from '../src/game/tree.js'
+
+const tray = location.search.includes('tray')
+// 헤드리스 크롬은 창을 아주 작게는 못 만든다. 크기를 창에서 읽지 않고 받아 온다.
+const size = Number(new URLSearchParams(location.search).get('size')) || innerWidth
+
+function star(cx, cy, outer, inner) {
+  const points = []
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 === 0 ? outer : inner
+    const a = -Math.PI / 2 + (i * Math.PI) / 5
+    points.push(`${(cx + Math.cos(a) * r).toFixed(1)},${(cy + Math.sin(a) * r).toFixed(1)}`)
+  }
+  return points.join(' ')
+}
+
+const tiers = [...TIERS].reverse()
+// 트리가 차지하는 네모(기준 판 좌표): 별 꼭대기부터 기둥 밑까지.
+const box = { x: CX - 190, y: STAR.y - 34, w: 380, h: TRUNK.y + TRUNK.h - (STAR.y - 34) }
+
+let inner
+if (tray) {
+  inner = `<g fill="#000" stroke="#000" stroke-width="10" stroke-linejoin="round">
+    ${tiers.map((t) => `<path d="${tierPath(t)}"/>`).join('')}
+    <rect x="${TRUNK.x - 6}" y="${TRUNK.y}" width="${TRUNK.w + 12}" height="${TRUNK.h}"/>
+    <polygon points="${star(STAR.x, STAR.y, 34, 15)}"/>
+  </g>`
+} else {
+  const balls = [[196, 168, '#ff5f57'], [262, 236, '#febc2e'], [172, 306, '#28c840'], [296, 352, '#ff5f57'], [226, 388, '#febc2e'], [120, 420, '#28c840'], [330, 430, '#28c840'], [236, 300, '#ff5f57']]
+  inner = `<defs>
+      <linearGradient id="leaf" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4dbb7d"/><stop offset=".5" stop-color="#25894f"/><stop offset="1" stop-color="#115a34"/></linearGradient>
+      <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff3a6"/><stop offset="1" stop-color="#ffb300"/></linearGradient>
+      <radialGradient id="halo"><stop offset="0" stop-color="#fff2a8" stop-opacity=".7"/><stop offset="1" stop-color="#fff2a8" stop-opacity="0"/></radialGradient>
+      <filter id="shade" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="6" stdDeviation="4" flood-color="#052a18" flood-opacity=".55"/></filter>
+    </defs>
+    <rect x="${TRUNK.x}" y="${TRUNK.y}" width="${TRUNK.w}" height="${TRUNK.h}" rx="5" fill="#8a5632"/>
+    ${tiers.map((t) => `<path d="${tierPath(t)}" fill="url(#leaf)" stroke="#1d7a48" stroke-width="3" stroke-linejoin="round" filter="url(#shade)"/>`).join('')}
+    ${balls.map(([x, y, c]) => `<circle cx="${x}" cy="${y}" r="17" fill="${c}" stroke="rgba(0,0,0,.22)" stroke-width="1.5"/><circle cx="${x - 5}" cy="${y - 6}" r="5" fill="rgba(255,255,255,.55)"/>`).join('')}
+    <circle cx="${STAR.x}" cy="${STAR.y}" r="60" fill="url(#halo)"/>
+    <polygon points="${star(STAR.x, STAR.y, 34, 15)}" fill="url(#gold)" stroke="#fff8d0" stroke-width="2" stroke-linejoin="round"/>`
+}
+
+// macOS 아이콘 격자: 1024 중 824 가 몸, 모서리 반지름은 그 22% 쯤.
+const pad = tray ? 0 : size * 0.098
+const side = size - pad * 2
+const fit = (tray ? 0.94 : 0.8) * side / Math.max(box.w, box.h)
+const tx = size / 2 - (box.x + box.w / 2) * fit
+const ty = size / 2 - (box.y + box.h / 2) * fit
+const plate = tray ? '' : `<defs><linearGradient id="night" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#27365a"/><stop offset="1" stop-color="#0f1626"/></linearGradient></defs>
+  <rect x="${pad}" y="${pad}" width="${side}" height="${side}" rx="${side * 0.225}" fill="url(#night)"/>`
+document.getElementById('root').innerHTML =
+  `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${plate}<g transform="translate(${tx} ${ty}) scale(${fit})">${inner}</g></svg>`
+</script>

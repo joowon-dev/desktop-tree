@@ -1,0 +1,20 @@
+{
+  "name": "desktop-tree",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "떠 있는 창들의 빨강·노랑·초록 단추가 방울로 달리는 크리스마스 트리 — 방울을 누르면 그 창이 닫히고·접히고·커진다 (맥·윈도우)",
+  "scripts": {
+    "start": "./mac/build.sh && { pkill -f MacOS/DesktopTree || true; } && while pgrep -f MacOS/DesktopTree >/dev/null; do sleep 0.2; done && open 'dist/mac/Desktop Tree.app'",
+    "build:mac": "./mac/build.sh --zip",
+    "build:win": "./windows/build.sh --zip",
+    "dmg": "./mac/dmg.sh",
+    "notarize": "./mac/notarize.sh",
+    "icons": "./scripts/make-icons.sh",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.8"
+  }
+}
