@@ -15,17 +15,25 @@ public static class Mouse2 {
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
-  static void Nudge() { mouse_event(1, 0, 0, 0, UIntPtr.Zero); }
+  [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
+  // SetCursorPos 는 커서만 옮기고 「움직였다」는 이벤트를 안 낸다 — 앱의 마우스 훅이 못 본다.
+  // 그래서 진짜 움직임(절대 좌표)을 같이 보낸다.
+  static void MoveTo(int x, int y) {
+    SetCursorPos(x, y);
+    uint nx = (uint)(x * 65535 / Math.Max(1, GetSystemMetrics(0) - 1));
+    uint ny = (uint)(y * 65535 / Math.Max(1, GetSystemMetrics(1) - 1));
+    mouse_event(0x8001, nx, ny, 0, UIntPtr.Zero);
+  }
   public static void Click(int x, int y) {
-    SetCursorPos(x, y); Nudge(); System.Threading.Thread.Sleep(500);
+    MoveTo(x, y); System.Threading.Thread.Sleep(500);
     mouse_event(2, 0, 0, 0, UIntPtr.Zero); System.Threading.Thread.Sleep(80); mouse_event(4, 0, 0, 0, UIntPtr.Zero);
   }
   public static void Drag(int x, int y, int x2, int y2) {
-    SetCursorPos(x, y); Nudge(); System.Threading.Thread.Sleep(500);
+    MoveTo(x, y); System.Threading.Thread.Sleep(500);
     mouse_event(2, 0, 0, 0, UIntPtr.Zero);
     for (int i = 1; i <= 20; i++) {
       System.Threading.Thread.Sleep(30);
-      SetCursorPos(x + (x2 - x) * i / 20, y + (y2 - y) * i / 20); Nudge();
+      MoveTo(x + (x2 - x) * i / 20, y + (y2 - y) * i / 20);
     }
     System.Threading.Thread.Sleep(200);
     mouse_event(4, 0, 0, 0, UIntPtr.Zero);
@@ -62,9 +70,14 @@ Check "제거 프로그램이 있다" (Test-Path (Join-Path $app "unins000.exe")
 Check "시작 프로그램에 들어갔다" (Test-Path (Join-Path ([Environment]::GetFolderPath("Startup")) "Desktop Tree.lnk"))
 
 Write-Host "› 뜨는가"
-Start-Sleep 12
-Check "설치가 끝나고 앱이 스스로 떴다" ($null -ne (Get-Process DesktopTree -ErrorAction SilentlyContinue))
+# 처음 켤 때는 웹뷰가 자리를 잡느라 오래 걸린다(러너에서 13초). 다리가 살아날 때까지 기다린다.
 $log = Join-Path $data "debug.log"
+for ($i = 0; $i -lt 45; $i++) {
+  Start-Sleep 1
+  if ((Test-Path $log) -and ((Get-Content $log -Raw -Encoding UTF8) -match "누를 자리 \d+개")) { break }
+}
+Start-Sleep 3
+Check "설치가 끝나고 앱이 스스로 떴다" ($null -ne (Get-Process DesktopTree -ErrorAction SilentlyContinue))
 function LogText { if (Test-Path $log) { Get-Content $log -Raw -Encoding UTF8 } else { "" } }
 function LastMatch($pattern) {
   $all = [regex]::Matches((LogText), $pattern)
@@ -133,6 +146,7 @@ Check "초록 방울을 다시 → 되돌아갔다" ($script:seen.back -eq "Norm
 Check "노랑 방울 → 창이 접혔다" ($script:seen.folded -eq "Minimized")
 Check "노랑 방울을 다시 → 펴졌다" ($script:seen.unfolded -eq "Normal")
 Check "기둥을 잡고 끄니 트리가 옮겨졌다" $script:seen.moved
+Check "끄는 동안 움직임이 앱에 닿았다" ((LogText) -match "잡음 ")
 Check "빨강 방울 → 창이 닫혔다" $closedByBall
 Check "누른 것이 전부 통했다 (말 안 듣는 창 없음)" (-not ((LogText) -match "누름 \S+ → fail"))
 

@@ -639,6 +639,7 @@ sealed class Overlay : Form
                     {
                         swallowRelease = true;
                         drag = (point, Location);
+                        DebugLog($"잡음 {point.X},{point.Y}");
                         return 1;
                     }
                     break;
@@ -657,8 +658,10 @@ sealed class Overlay : Form
                         swallowRelease = false;
                         if (drag is { } began)
                         {
+                            // 뗀 자리로 한 번 더 옮긴다 — 움직임이 하나도 안 왔어도(빠르게 끌었을 때) 놓은 자리가 맞게.
+                            var last = new Point(began.Origin.X + point.X - began.Mouse.X, began.Origin.Y + point.Y - began.Mouse.Y);
                             drag = null;
-                            BeginInvoke(() => Released(began.Origin));
+                            BeginInvoke(() => { Location = last; Released(began.Origin); });
                         }
                         return 1;
                     }
