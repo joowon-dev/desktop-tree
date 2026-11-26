@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { createEngine, KINDS, MAX_WINDOWS, keyOf, parseKey } from '../src/game/engine.js'
-import { BALL, CX, HANG, STAR, TIERS, TRUNK, bodyBands, fits, halfWidthAt, mulberry32, pickSpot } from '../src/game/tree.js'
+import { BALL, CX, HANG, OLD_SIZES, SCALE, STAR, TIERS, TRUNK, bodyBands, clampScale, fits, halfWidthAt, mulberry32, pickSpot } from '../src/game/tree.js'
 import { fall, BOUNCE } from '../src/game/fall.js'
 
 const win = (id, more = {}) => ({ id, app: `앱${id}`, pid: 100 + id, ...more })
@@ -75,6 +75,18 @@ describe('트리의 모양', () => {
     const taken = []
     for (let i = 0; i < 40; i++) taken.push(pickSpot(taken, rng))
     for (const spot of taken) expect(inside(spot.x, spot.y)).toBe(true)
+  })
+
+  it('크기는 0.3 배에서 1.6 배 사이다 — 벗어나면 끝에 붙고, 숫자가 아니면 보통 크기다', () => {
+    expect(SCALE).toEqual({ min: 0.3, max: 1.6 })
+    expect(clampScale(0.05)).toBe(0.3)
+    expect(clampScale(9)).toBe(1.6)
+    expect(clampScale(0.4567)).toBe(0.46) // 소수 둘째 자리까지
+    expect(clampScale(1)).toBe(1)
+    expect(clampScale('작게')).toBe(1)
+    expect(clampScale(undefined)).toBe(1)
+    expect(clampScale(NaN)).toBe(1)
+    expect(OLD_SIZES).toEqual({ s: 0.8, m: 1, l: 1.3 }) // 1.0.0 의 설정을 그 크기 그대로 이어받는다
   })
 
   it('층은 위에서 아래로 넓어진다', () => {

@@ -129,14 +129,23 @@ $timer.Add_Tick({
         [Mouse2]::Drag($x, $y, $x - 400, $y - 150)
       }
     }
-    6 { $script:seen.moved = ((LogText) -match "옮김 "); Shot "5-moved"; Press $script:hwnd "red" }
-    7 { $timer.Stop(); if (-not $script:closed) { $form.Close() } }
+    6 {
+      $script:seen.moved = ((LogText) -match "옮김 "); Shot "5-moved"
+      $m = LastMatch "별 (-?\d+),(-?\d+)"
+      if ($null -ne $m) {
+        $x = [int]$m.Groups[1].Value; $y = [int]$m.Groups[2].Value
+        Write-Host "  별 $x,$y → 아래로 끌어 줄인다"
+        [Mouse2]::Drag($x, $y, $x, $y + 220)
+      }
+    }
+    7 { $script:seen.sized = (LastMatch "크기 ([0-9.]+)"); Shot "5b-small"; Press $script:hwnd "red" }
+    8 { $timer.Stop(); if (-not $script:closed) { $form.Close() } }
   }
 })
 $form.Add_Shown({ $timer.Start() })
 [System.Windows.Forms.Application]::Run($form)
-# 빨강을 눌러 닫혔으면 7번째 걸음 전에 창이 닫혀 여기로 온다.
-$closedByBall = $script:step -lt 7
+# 빨강을 눌러 닫혔으면 8번째 걸음 전에 창이 닫혀 여기로 온다.
+$closedByBall = $script:step -lt 8
 Start-Sleep 2
 Shot "6-dropped"
 
@@ -147,6 +156,9 @@ Check "노랑 방울 → 창이 접혔다" ($script:seen.folded -eq "Minimized")
 Check "노랑 방울을 다시 → 펴졌다" ($script:seen.unfolded -eq "Normal")
 Check "기둥을 잡고 끄니 트리가 옮겨졌다" $script:seen.moved
 Check "끄는 동안 움직임이 앱에 닿았다" ((LogText) -match "잡음 ")
+$sized = if ($null -ne $script:seen.sized) { [double]$script:seen.sized.Groups[1].Value } else { 0 }
+Write-Host "  별을 끈 뒤의 크기: $sized"
+Check "별을 아래로 끄니 트리가 작아졌다" (($sized -gt 0) -and ($sized -lt 0.9))
 Check "빨강 방울 → 창이 닫혔다" $closedByBall
 Check "누른 것이 전부 통했다 (말 안 듣는 창 없음)" (-not ((LogText) -match "누름 \S+ → fail"))
 

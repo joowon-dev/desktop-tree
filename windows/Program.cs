@@ -63,7 +63,8 @@ sealed class OverlayContext : ApplicationContext
     {
         var menu = new ContextMenuStrip();
         menu.Items.Add(new ToolStripMenuItem($"창 {overlay.WindowCount}개의 방울이 달려 있습니다") { Enabled = false });
-        menu.Items.Add(new ToolStripMenuItem("빨강 닫기 · 노랑 접기 · 초록 키우기 · 트리는 끌어서 옮기기") { Enabled = false });
+        menu.Items.Add(new ToolStripMenuItem("빨강 닫기 · 노랑 접기 · 초록 키우기") { Enabled = false });
+        menu.Items.Add(new ToolStripMenuItem("트리를 끌면 옮겨지고, 별을 끌면 크기가 바뀝니다") { Enabled = false });
         // 새 버전이 있을 때만 낸다. 없으면 메뉴에 아무 흔적도 없다.
         if (overlay.UpdateVersion is not null)
         {
@@ -79,7 +80,15 @@ sealed class OverlayContext : ApplicationContext
         menu.Items.Add(new ToolStripMenuItem("숨기기", null, (_, _) => overlay.Toggle("hidden")) { Checked = overlay.Flag("hidden") });
         menu.Items.Add(new ToolStripMenuItem("꼬마전구 반짝임", null, (_, _) => overlay.Toggle("twinkle")) { Checked = overlay.Flag("twinkle") });
         menu.Items.Add(Choices("자리 (끌어서도 옮깁니다)", "spot", "right", [("왼쪽 구석", "left"), ("오른쪽 구석", "right")]));
-        menu.Items.Add(Choices("크기", "size", "m", [("작게", "s"), ("보통", "m"), ("크게", "l")]));
+        var sizes = new ToolStripMenuItem("크기 (별을 끌어서도 바꿉니다)");
+        foreach (var (label, value) in Overlay.ScalePresets)
+        {
+            sizes.DropDownItems.Add(new ToolStripMenuItem(label, null, (_, _) => overlay.Choose("scale", value))
+            {
+                Checked = Math.Abs(overlay.CurrentScale - value) < 0.02,
+            });
+        }
+        menu.Items.Add(sizes);
         menu.Items.Add(new ToolStripSeparator());
         if (Overlay.Uninstaller is not null)
         {
@@ -241,6 +250,15 @@ sealed class Overlay : Form
     /// <summary>누른 것을 삼켰으면 떼는 것도 삼킨다 — 밑의 앱이 「뗀 것만」 받으면 안 된다.</summary>
     private bool swallowRelease;
     private Point? anchor;
+    /// <summary>크기를 정하는 손잡이 — 꼭대기 별(창의 왼쪽 위에서 잰 실제 픽셀). 잡고 끌면 밑동은 그대로 있고 별이 마우스를 따라온다.</summary>
+    private (double X, double Y, double R)? grip;
+    /// <summary>별이 밑동에서 얼마나 높이 있나(창 높이에 대한 비율). 판의 모양이 정하는 값이라 크기가 바뀌어도 같다.</summary>
+    private double gripRatio = 0.886;
+    private bool overGrip;
+    /// <summary>크기를 바꾸는 중이면: 별과 마우스의 높이 차, 밑동의 가운데(화면 픽셀).</summary>
+    private (int Offset, Point Base)? resize;
+    /// <summary>끌어서 정한 크기. 렌더러가 설정으로 되돌려 줄 때까지 이 값을 쓴다.</summary>
+    private double? liveScale;
 
     private IntPtr hook;
     private readonly HookProc hookProc; // 지워지면 안 된다. 훅이 이 대리자를 부른다.
@@ -280,14 +298,27 @@ sealed class Overlay : Form
 
     // MARK: 자리와 크기
 
-    private double SizeScale => Choice("size") switch { "s" => 0.8, "l" => 1.3, _ => 1.0 };
+    /// <summary>트리의 크기(기준 판에 곱하는 배율)의 범위. src/game/tree.js 의 SCALE 과 같아야 한다.</summary>
+    private const double ScaleMin = 0.3, ScaleMax = 1.6;
+    /// <summary>메뉴에서 고르는 크기. 그 사이는 별을 끌어서 정한다.</summary>
+    public static readonly (string Label, double Value)[] ScalePresets =
+        [("아주 작게", 0.3), ("작게", 0.55), ("조금 작게", 0.8), ("보통", 1.0), ("크게", 1.3)];
+
+    public double CurrentScale
+    {
+        get
+        {
+            var saved = settings.TryGetValue("scale", out var value) && value.ValueKind == JsonValueKind.Number ? value.GetDouble() : 1.0;
+            return Math.Clamp(liveScale ?? saved, ScaleMin, ScaleMax);
+        }
+    }
 
     /// <summary>트리가 설 자리: 끌어다 놓은 데가 있으면 거기, 없으면 작업 표시줄 위 화면의 오른쪽(또는 왼쪽) 구석.</summary>
     private Rectangle TreeBounds()
     {
         var dpi = DeviceDpi / 96.0;
-        var width = (int)Math.Round(BoardW * SizeScale * dpi);
-        var height = (int)Math.Round(BoardH * SizeScale * dpi);
+        var width = (int)Math.Round(BoardW * CurrentScale * dpi);
+        var height = (int)Math.Round(BoardH * CurrentScale * dpi);
         if (anchor is { } at) return KeptOnScreen(new Rectangle(at.X - width / 2, at.Y - height, width, height));
         var room = Screen.PrimaryScreen!.WorkingArea;
         var x = Choice("spot") == "left" ? room.Left + 8 : room.Right - width - 8;
@@ -305,7 +336,7 @@ sealed class Overlay : Form
 
     private void Place()
     {
-        if (drag is not null) return; // 끄는 동안에는 손이 자리를 정한다
+        if (drag is not null || resize is not null) return; // 끄는 동안에는 손이 자리와 크기를 정한다
         var frame = TreeBounds();
         if (Bounds != frame) Bounds = frame;
         var hide = Flag("hidden");
@@ -355,7 +386,7 @@ sealed class Overlay : Form
 
     public void Toggle(string key) => Call("__treeSet", key, !Flag(key));
 
-    public void Choose(string key, string value)
+    public void Choose(string key, object value)
     {
         if (key == "spot")
         {
@@ -587,13 +618,24 @@ sealed class Overlay : Form
     {
         if (!Visible || !Bounds.Contains(screen)) return null;
         double x = screen.X - Bounds.Left, y = screen.Y - Bounds.Top;
+        // 트리가 작으면 누를 수 있는 동그라미끼리 겹친다. 그중 가장 가까운 것이다.
+        string? best = null;
+        var nearest = double.MaxValue;
         foreach (var hit in hits)
         {
-            var dx = hit.X - x;
-            var dy = hit.Y - y;
-            if (dx * dx + dy * dy <= hit.R * hit.R) return hit.Key;
+            var far = Math.Sqrt((hit.X - x) * (hit.X - x) + (hit.Y - y) * (hit.Y - y));
+            if (far > hit.R || far >= nearest) continue;
+            nearest = far;
+            best = hit.Key;
         }
-        return null;
+        return best;
+    }
+
+    private bool OnGrip(Point screen)
+    {
+        if (!Visible || grip is not { } star || !Bounds.Contains(screen)) return false;
+        double dx = star.X - (screen.X - Bounds.Left), dy = star.Y - (screen.Y - Bounds.Top);
+        return dx * dx + dy * dy <= star.R * star.R;
     }
 
     private bool OverBody(Point screen)
@@ -606,8 +648,13 @@ sealed class Overlay : Form
     /// <summary>마우스가 올라온 방울이 바뀔 때만 렌더러를 깨운다. 자리만 묻는다.</summary>
     private void CheckPointer()
     {
-        if (drag is not null) return;
-        SetHovered(HitAt(Cursor.Position));
+        if (drag is not null || resize is not null) return;
+        var key = HitAt(Cursor.Position);
+        SetHovered(key);
+        var star = key is null && OnGrip(Cursor.Position);
+        if (star == overGrip) return;
+        overGrip = star;
+        Call("__treeGrip", star);
     }
 
     private void SetHovered(string? key)
@@ -635,6 +682,13 @@ sealed class Overlay : Form
                         BeginInvoke(() => Press(key));
                         return 1;
                     }
+                    if (OnGrip(point) && grip is { } star)
+                    {
+                        swallowRelease = true;
+                        resize = (Bounds.Top + (int)Math.Round(star.Y) - point.Y, new Point(Bounds.Left + Bounds.Width / 2, Bounds.Bottom));
+                        DebugLog($"별 잡음 {point.X},{point.Y}");
+                        return 1;
+                    }
                     if (OverBody(point))
                     {
                         swallowRelease = true;
@@ -645,7 +699,12 @@ sealed class Overlay : Form
                     break;
 
                 case WM_MOUSEMOVE:
-                    if (drag is { } held)
+                    if (resize is { } sizing)
+                    {
+                        var next = Resized(sizing, point);
+                        BeginInvoke(() => { if (resize is not null) Bounds = next; });
+                    }
+                    else if (drag is { } held)
                     {
                         var to = new Point(held.Origin.X + point.X - held.Mouse.X, held.Origin.Y + point.Y - held.Mouse.Y);
                         BeginInvoke(() => { if (drag is not null) Location = to; });
@@ -656,7 +715,13 @@ sealed class Overlay : Form
                     if (swallowRelease)
                     {
                         swallowRelease = false;
-                        if (drag is { } began)
+                        if (resize is { } sized)
+                        {
+                            var last = Resized(sized, point);
+                            resize = null;
+                            BeginInvoke(() => { Bounds = last; ResizeDone(); });
+                        }
+                        else if (drag is { } began)
                         {
                             // 뗀 자리로 한 번 더 옮긴다 — 움직임이 하나도 안 왔어도(빠르게 끌었을 때) 놓은 자리가 맞게.
                             var last = new Point(began.Origin.X + point.X - began.Mouse.X, began.Origin.Y + point.Y - began.Mouse.Y);
@@ -669,6 +734,30 @@ sealed class Overlay : Form
             }
         }
         return CallNextHookEx(hook, code, wParam, lParam);
+    }
+
+    /// <summary>밑동은 그대로 있고 별이 마우스의 높이를 따라온다. 그때의 크기와 창의 자리.</summary>
+    private Rectangle Resized((int Offset, Point Base) sizing, Point mouse)
+    {
+        var dpi = DeviceDpi / 96.0;
+        var tall = (sizing.Base.Y - (mouse.Y + sizing.Offset)) / gripRatio;
+        var scale = Math.Clamp(tall / (BoardH * dpi), ScaleMin, ScaleMax);
+        liveScale = scale;
+        var width = (int)Math.Round(BoardW * scale * dpi);
+        var height = (int)Math.Round(BoardH * scale * dpi);
+        return new Rectangle(sizing.Base.X - width / 2, sizing.Base.Y - height, width, height);
+    }
+
+    private void ResizeDone()
+    {
+        // 줄이고 키운 자리에 그대로 서 있게, 밑동의 자리를 기억한다.
+        var frame = KeptOnScreen(Bounds);
+        anchor = new Point(frame.Left + frame.Width / 2, frame.Bottom);
+        SaveAnchor();
+        var scale = Math.Round(liveScale ?? 1, 2);
+        Call("__treeSet", "scale", scale);
+        Call("__treeMoved");
+        DebugLog($"크기 {scale.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
     }
 
     /// <summary>내려놓은 자리를 기억한다. 화면 밖에 걸쳤으면 안으로 밀어 넣는다.</summary>
@@ -901,6 +990,7 @@ sealed class Overlay : Form
             saveState: (s) => post({ type: 'state', json: JSON.stringify(s) }),
             setSettings: (s) => post({ type: 'settings', settings: s }),
             setHits: (list) => { const k = real(); post({ type: 'hits', list: list.map((h) => ({ key: String(h.key), x: h.x * k, y: h.y * k, r: h.r * k })) }) },
+            setGrip: (g) => { const k = real(); post({ type: 'grip', x: g.x * k, y: g.y * k, r: g.r * k }) },
             setBody: (list) => { const k = real(); post({ type: 'body', list: list.map((b) => ({ x: b.x * k, y: b.y * k, w: b.w * k, h: b.h * k })) }) },
             ready: () => post({ type: 'ready' }),
             onSet: hook('__treeSet'),
@@ -908,6 +998,7 @@ sealed class Overlay : Form
             onHover: hook('__treeHover'),
             onPressed: hook('__treePressed'),
             onMoved: hook('__treeMoved'),
+            onGrip: hook('__treeGrip'),
           }
           window.addEventListener('error', (e) => post({ type: 'log', text: `${e.message} (${e.filename}:${e.lineno})` }))
           window.addEventListener('unhandledrejection', (e) => post({ type: 'log', text: `reject ${e.reason}` }))
@@ -928,6 +1019,7 @@ sealed class Overlay : Form
         if (!Debugging) return;
         foreach (var hit in hits)
             DebugLog($"방울 {hit.Key} {(int)Math.Round(Bounds.Left + hit.X)},{(int)Math.Round(Bounds.Top + hit.Y)}");
+        if (grip is { } star) DebugLog($"별 {(int)Math.Round(Bounds.Left + star.X)},{(int)Math.Round(Bounds.Top + star.Y)}");
         if (body.Count > 0)
         {
             var trunk = body[^1];
@@ -967,6 +1059,7 @@ sealed class Overlay : Form
                 case "settings":
                     if (message.TryGetProperty("settings", out var given) && given.ValueKind == JsonValueKind.Object)
                         settings = given.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone());
+                    if (resize is null) liveScale = null; // 끌어서 정한 크기가 설정으로 돌아왔다
                     Place();
                     SettingsChanged?.Invoke();
                     break;
@@ -982,6 +1075,11 @@ sealed class Overlay : Form
                         .Where(h => h.Item1.Length > 0).ToList();
                     DebugLog($"누를 자리 {hits.Count}개");
                     LogHits();
+                    break;
+
+                case "grip":
+                    grip = (Num(message, "x"), Num(message, "y"), Num(message, "r"));
+                    if (resize is null && Height > 0 && Num(message, "y") > 0) gripRatio = (Height - Num(message, "y")) / Height;
                     break;
 
                 case "body":

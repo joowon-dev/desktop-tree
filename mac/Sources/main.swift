@@ -58,7 +58,10 @@ private func run(_ tool: String, _ arguments: [String]) -> Int32 {
 }
 /// 기준 판의 크기(pt). src/game/tree.js 의 BOARD 와 같아야 한다.
 private let boardSize = CGSize(width: 460, height: 560)
-private let sizeScales: [String: CGFloat] = ["s": 0.8, "m": 1.0, "l": 1.3]
+/// 트리의 크기(기준 판에 곱하는 배율)의 범위. src/game/tree.js 의 SCALE 과 같아야 한다.
+private let scaleRange: ClosedRange<CGFloat> = 0.3...1.6
+/// 메뉴에서 고르는 크기. 그 사이는 별을 끌어서 정한다.
+private let scalePresets: [(String, Double)] = [("아주 작게", 0.3), ("작게", 0.55), ("조금 작게", 0.8), ("보통", 1.0), ("크게", 1.3)]
 /// 마우스 자리를 보는 간격. 방울 위에 올라왔다·나갔다가 바뀔 때만 렌더러를 깨운다.
 private let pointerInterval: TimeInterval = 1.0 / 30
 /// 창의 목록을 다시 읽는 간격.
@@ -439,6 +442,15 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
     private var overBody = false
     /// 끄는 중이면: 잡은 순간의 마우스 자리와 창의 자리.
     private var drag: (mouse: NSPoint, origin: NSPoint)?
+    /// 크기를 정하는 손잡이 — 꼭대기 별(웹 좌표). 잡고 끌면 밑동은 그대로 있고 별이 마우스를 따라온다.
+    private var grip: (center: CGPoint, radius: CGFloat)?
+    /// 별이 밑동에서 얼마나 높이 있나(창 높이에 대한 비율). 판의 모양이 정하는 값이라 크기가 바뀌어도 같다.
+    private var gripRatio: CGFloat = 0.886
+    private var overGrip = false
+    /// 크기를 바꾸는 중이면: 별과 마우스의 높이 차, 밑동의 가운데(화면 좌표).
+    private var resize: (offset: CGFloat, base: NSPoint)?
+    /// 끌어서 정한 크기. 렌더러가 설정으로 되돌려 줄 때까지 이 값을 쓴다.
+    private var liveScale: CGFloat?
     private var lastSettingsOpen = Date.distantPast
 
     private var updateVersion: String?
@@ -477,7 +489,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
 
     /// 트리가 설 자리: 끌어다 놓은 데가 있으면 거기, 없으면 Dock 위 화면의 오른쪽(또는 왼쪽) 구석.
     private func treeFrame() -> NSRect {
-        let scale = sizeScales[settings["size"] as? String ?? "m"] ?? 1
+        let scale = currentScale
         let width = boardSize.width * scale, height = boardSize.height * scale
         if let saved = UserDefaults.standard.array(forKey: anchorKey) as? [Double], saved.count == 2 {
             return Self.keptOnScreen(NSRect(x: saved[0] - width / 2, y: saved[1], width: width, height: height))
@@ -485,6 +497,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         let room = Self.primaryScreen.visibleFrame
         let x = settings["spot"] as? String == "left" ? room.minX + 8 : room.maxX - width - 8
         return NSRect(x: x, y: room.minY, width: width, height: height)
+    }
+
+    private var currentScale: CGFloat {
+        let saved = (settings["scale"] as? NSNumber).map { CGFloat($0.doubleValue) } ?? 1
+        return min(max(liveScale ?? saved, scaleRange.lowerBound), scaleRange.upperBound)
     }
 
     /// 트리가 화면 밖으로 사라지지 않게 한다 — 가장 많이 걸친 화면 안으로 밀어 넣는다(모니터를 뽑았을 때도).
@@ -502,7 +519,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
     }
 
     private func place() {
-        guard drag == nil else { return } // 끄는 동안에는 손이 자리를 정한다
+        guard drag == nil, resize == nil else { return } // 끄는 동안에는 손이 자리와 크기를 정한다
         let frame = treeFrame()
         if window.frame != frame { window.setFrame(frame, display: true) }
         if settings["hidden"] as? Bool == true {
@@ -566,6 +583,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
             saveState: (s) => post({ type: 'state', json: JSON.stringify(s) }),
             setSettings: (s) => post({ type: 'settings', settings: s }),
             setHits: (list) => post({ type: 'hits', list: list.map((h) => ({ key: String(h.key), x: +h.x, y: +h.y, r: +h.r })) }),
+            setGrip: (g) => post({ type: 'grip', x: +g.x, y: +g.y, r: +g.r }),
             setBody: (list) => post({ type: 'body', list: list.map((b) => ({ x: +b.x, y: +b.y, w: +b.w, h: +b.h })) }),
             ready: () => post({ type: 'ready' }),
             onSet: hook('__treeSet'),
@@ -573,6 +591,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
             onHover: hook('__treeHover'),
             onPressed: hook('__treePressed'),
             onMoved: hook('__treeMoved'),
+            onGrip: hook('__treeGrip'),
           }
           // 웹뷰는 콘솔이 안 보인다. 오류만이라도 셸의 stderr 로 흘려보낸다.
           window.addEventListener('error', (e) => post({ type: 'log', text: `${e.message} (${e.filename}:${e.lineno})` }))
@@ -599,17 +618,32 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
 
     private func hit(at point: CGPoint?) -> String? {
         guard let point else { return nil }
-        return hits.first { hypot($0.center.x - point.x, $0.center.y - point.y) <= $0.radius }?.key
+        // 트리가 작으면 누를 수 있는 동그라미끼리 겹친다. 그중 가장 가까운 것이다.
+        return hits.map { (key: $0.key, far: hypot($0.center.x - point.x, $0.center.y - point.y), radius: $0.radius) }
+            .filter { $0.far <= $0.radius }.min { $0.far < $1.far }?.key
+    }
+
+    private func onGrip(_ point: CGPoint?) -> Bool {
+        guard let point, let grip else { return false }
+        return hypot(grip.center.x - point.x, grip.center.y - point.y) <= grip.radius
+    }
+
+    private func setOverGrip(_ on: Bool) {
+        guard on != overGrip else { return }
+        overGrip = on
+        call("__treeGrip", on)
+        debugLog("별 \(on ? "위" : "밖") \(grip.map { "\($0.center) r\($0.radius)" } ?? "-") 비율 \(gripRatio)")
     }
 
     private func checkPointer() {
-        guard settings["hidden"] as? Bool != true, drag == nil else { return }
+        guard settings["hidden"] as? Bool != true, drag == nil, resize == nil else { return }
         let point = mouseInWindow()
         let key = hit(at: point)
         overBody = point.map { at in body.contains { $0.contains(at) } } ?? false
         setHovered(key)
-        // 방울이나 몸통 위에 있을 때만 창이 마우스를 받는다. 그 밖에서는 전부 밑의 앱으로 통과한다.
-        window.ignoresMouseEvents = key == nil && !overBody
+        setOverGrip(key == nil && onGrip(point))
+        // 방울·별·몸통 위에 있을 때만 창이 마우스를 받는다. 그 밖에서는 전부 밑의 앱으로 통과한다.
+        window.ignoresMouseEvents = key == nil && !overBody && !overGrip
     }
 
     private func setHovered(_ key: String?) {
@@ -618,10 +652,16 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         call("__treeHover", key ?? NSNull())
     }
 
-    /// 방울을 눌렀으면 그 창에 일을 시키고, 몸통을 눌렀으면 끌기 시작한다.
+    /// 방울을 눌렀으면 그 창에 일을 시키고, 별을 눌렀으면 크기를, 몸통을 눌렀으면 자리를 끌기 시작한다.
     private func pressed() {
-        guard let key = hit(at: mouseInWindow()) ?? hovered else {
-            drag = (NSEvent.mouseLocation, window.frame.origin)
+        let point = mouseInWindow()
+        guard let key = hit(at: point) ?? hovered else {
+            let mouse = NSEvent.mouseLocation, frame = window.frame
+            if onGrip(point), let grip {
+                resize = (frame.maxY - grip.center.y - mouse.y, NSPoint(x: frame.midX, y: frame.minY))
+            } else {
+                drag = (mouse, frame.origin)
+            }
             return
         }
         let parts = key.split(separator: ":")
@@ -633,13 +673,33 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
     }
 
     private func dragged() {
-        guard let drag else { return }
         let mouse = NSEvent.mouseLocation
+        if let resize {
+            // 밑동은 그대로 있고 별이 마우스의 높이를 따라온다.
+            let tall = (mouse.y + resize.offset - resize.base.y) / gripRatio
+            let scale = min(max(tall / boardSize.height, scaleRange.lowerBound), scaleRange.upperBound)
+            liveScale = scale
+            let width = boardSize.width * scale, height = boardSize.height * scale
+            window.setFrame(NSRect(x: resize.base.x - width / 2, y: resize.base.y, width: width, height: height), display: true)
+            return
+        }
+        guard let drag else { return }
         window.setFrameOrigin(NSPoint(x: drag.origin.x + mouse.x - drag.mouse.x, y: drag.origin.y + mouse.y - drag.mouse.y))
     }
 
     /// 내려놓은 자리를 기억한다. 화면 밖에 걸쳤으면 안으로 밀어 넣는다.
     private func released() {
+        if resize != nil {
+            resize = nil
+            let frame = Self.keptOnScreen(window.frame)
+            // 줄이고 키운 자리에 그대로 서 있게, 밑동의 자리를 기억한다.
+            UserDefaults.standard.set([Double(frame.midX), Double(frame.minY)], forKey: anchorKey)
+            let scale = (Double(liveScale ?? 1) * 100).rounded() / 100
+            call("__treeSet", "scale", scale)
+            call("__treeMoved")
+            debugLog("크기 \(scale)")
+            return
+        }
         guard let began = drag else { return }
         drag = nil
         guard window.frame.origin != began.origin else { return } // 누르기만 하고 안 끌었다
@@ -715,7 +775,8 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         }
 
         add("창 \(windowCount)개의 방울이 달려 있습니다")
-        add("빨강 닫기 · 노랑 접기 · 초록 키우기 · 트리는 끌어서 옮기기")
+        add("빨강 닫기 · 노랑 접기 · 초록 키우기")
+        add("트리를 끌면 옮겨지고, 별을 끌면 크기가 바뀝니다")
         if !AXIsProcessTrusted() {
             menu.addItem(.separator())
             add("⚠️ 손쉬운 사용 권한 켜기…", #selector(openAccessSettings))
@@ -730,7 +791,14 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
         add("숨기기", #selector(toggle(_:)), checked: flag("hidden"), value: "hidden")
         add("꼬마전구 반짝임", #selector(toggle(_:)), checked: flag("twinkle"), value: "twinkle")
         choices("자리 (끌어서도 옮깁니다)", key: "spot", fallback: "right", [("왼쪽 구석", "left"), ("오른쪽 구석", "right")])
-        choices("크기", key: "size", fallback: "m", [("작게", "s"), ("보통", "m"), ("크게", "l")])
+        let sizes = NSMenuItem(title: "크기 (별을 끌어서도 바꿉니다)", action: nil, keyEquivalent: "")
+        let sizeMenu = NSMenu()
+        sizeMenu.autoenablesItems = false
+        for (label, value) in scalePresets {
+            add(label, #selector(choose(_:)), checked: abs(Double(currentScale) - value) < 0.02, to: sizeMenu, value: ["scale", value])
+        }
+        sizes.submenu = sizeMenu
+        menu.addItem(sizes)
         menu.addItem(.separator())
         add("로그인할 때 켜기", #selector(toggleLoginItem), checked: SMAppService.mainApp.status == .enabled)
         add("바탕화면 트리 제거…", #selector(uninstall))
@@ -930,6 +998,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
             if let json = body["json"] as? String { UserDefaults.standard.set(json, forKey: stateKey) }
         case "settings":
             settings = body["settings"] as? [String: Any] ?? [:]
+            if resize == nil { liveScale = nil } // 끌어서 정한 크기가 설정으로 돌아왔다
             place()
             debugLog("설정 \(settings)")
         case "body":
@@ -939,6 +1008,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, WKScriptMessag
                       let w = item["w"] as? Double, let h = item["h"] as? Double else { return nil }
                 return CGRect(x: x, y: y, width: w, height: h)
             }
+        case "grip":
+            func number(_ key: String) -> CGFloat { CGFloat((body[key] as? NSNumber)?.doubleValue ?? 0) }
+            grip = (CGPoint(x: number("x"), y: number("y")), number("r"))
+            let tall = window.frame.height
+            if resize == nil, tall > 0, number("y") > 0 { gripRatio = (tall - number("y")) / tall }
         case "ready":
             watcher.resend()
         case "hits":

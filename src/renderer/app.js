@@ -2,13 +2,12 @@
 // 일어난 일을 화면에 옮긴다. 박자(타이머)가 없다 — 무슨 일이 있을 때만 깬다.
 
 import { createEngine, parseKey } from '../game/engine.js'
-import { BOARD, mulberry32 } from '../game/tree.js'
+import { BOARD, OLD_SIZES, clampScale, mulberry32 } from '../game/tree.js'
 import { createView } from '../render/view.js'
 
 const sneaky = window.sneaky || null
 const SPOTS = ['right', 'left']
-const SIZES = ['s', 'm', 'l']
-const settings = { hidden: false, spot: 'right', size: 'm', twinkle: true }
+const settings = { hidden: false, spot: 'right', scale: 1, twinkle: true }
 
 // 방울이 어디 달릴지는 켤 때마다 다르다. 씨앗은 여기서만 뽑는다(엔진은 시계를 모른다).
 const seed = Date.now() >>> 0
@@ -38,17 +37,18 @@ function relayout() {
     // 창이 곧 판이다. 셸이 크기와 자리를 정하고, 여기서는 그 폭에 맞춰 늘리기만 한다.
     view.setLayout({ x: 0, y: 0, scale: innerWidth / BOARD.w })
   } else {
-    const scale = { s: 0.8, m: 1, l: 1.3 }[settings.size]
+    const scale = settings.scale
     const x = settings.spot === 'left' ? 16 : innerWidth - BOARD.w * scale - 16
     view.setLayout({ x, y: innerHeight - BOARD.h * scale, scale })
   }
   sneaky?.setHits(view.hits())
   sneaky?.setBody(view.body())
+  sneaky?.setGrip(view.grip())
 }
 
 function set(key, value) {
   if (key === 'spot' && SPOTS.includes(value)) settings.spot = value
-  else if (key === 'size' && SIZES.includes(value)) settings.size = value
+  else if (key === 'scale') settings.scale = clampScale(value)
   else if (key === 'twinkle') settings.twinkle = !!value
   else if (key === 'hidden') settings.hidden = !!value
   else return
@@ -66,7 +66,9 @@ async function start() {
   if (typeof kept.hidden === 'boolean') settings.hidden = kept.hidden
   if (typeof kept.twinkle === 'boolean') settings.twinkle = kept.twinkle
   if (SPOTS.includes(kept.spot)) settings.spot = kept.spot
-  if (SIZES.includes(kept.size)) settings.size = kept.size
+  // 예전에는 크기가 셋 중 하나였다(s·m·l). 그 설정도 받아 준다.
+  if (typeof kept.scale === 'number') settings.scale = clampScale(kept.scale)
+  else if (kept.size in OLD_SIZES) settings.scale = OLD_SIZES[kept.size]
 
   view.setTwinkle(settings.twinkle)
   view.setHidden(settings.hidden)
@@ -80,6 +82,7 @@ async function start() {
     sneaky.onHover((key) => { engine.hover(settings.hidden ? null : key); flush() })
     sneaky.onPressed((key, result) => { engine.press(key, result); flush() })
     sneaky.onMoved(() => view.settle())
+    sneaky.onGrip((on) => view.setGrip(on))
     sneaky.ready() // 이제 들을 수 있다 — 창의 목록을 보내 달라
   } else {
     browserDemo()
@@ -119,7 +122,7 @@ function browserDemo() {
     if (key === 'h') set('hidden', !settings.hidden)
     if (key === 't') set('twinkle', !settings.twinkle)
     if (key === 'p') set('spot', SPOTS[(SPOTS.indexOf(settings.spot) + 1) % SPOTS.length])
-    if (key === 's') set('size', SIZES[(SIZES.indexOf(settings.size) + 1) % SIZES.length])
+    if (key === 's') set('scale', settings.scale >= 1.3 ? 0.3 : settings.scale + 0.25)
   })
 }
 
